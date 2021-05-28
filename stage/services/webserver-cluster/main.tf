@@ -2,18 +2,11 @@ provider "aws" {
   region = "us-east-2"
 }
 
-
-
 resource "aws_launch_configuration" "example" {
   image_id        = "ami-0c55b159cbfafe1f0"
   instance_type   = "t2.micro"
   security_groups = [aws_security_group.instance.id]
-
-  user_data = <<-EOF
-              #!/bin/bash
-              echo "Hello, World" > index.html
-              nohup busybox httpd -f -p ${var.server_port} &
-              EOF
+  user_data       = data.template_file.user_data.rendered
 
   lifecycle {
     create_before_destroy = true
@@ -125,27 +118,16 @@ resource "aws_lb_listener_rule" "asg" {
   }
 }
 
-resource "aws_s3_bucket" "terraform_state" {
-  bucket = "terraform-up-and-running-state"
 
-  # Prevent accidental deletion of this S3 bucket
-  lifecycle {
-    prevent_destroy = true
-  }
 
-  # Enable versioning so we can see the full revision history of our
-  # state files
-  versioning {
-    enabled = true
-  }
+resource "aws_dynamodb_table" "terraform_locks" {
+  name         = "terraform-up-and-running-locks"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LockID"
 
-  # Enable server-side encryption by default
-  server_side_encryption_configuration {
-    rule {
-      apply_server_side_encryption_by_default {
-        sse_algorithm = "AES256"
-      }
-    }
+  attribute {
+    name = "LockID"
+    type = "S"
   }
 }
 
@@ -157,14 +139,22 @@ data "aws_subnet_ids" "default" {
   vpc_id = data.aws_vpc.default.id
 }
 
+data "terraform_remote_state" "db" {
+  backend = "s3"
 
-variable "server_port" {
-  description = "The port the server will use for HTTP requests"
-  type        = number
-  default     = 8080
+  config = {
+    bucket = var.db_remote_state_bucket
+    key    = var.db_remote_state_key
+    region = "us-east-2"
+  }
 }
 
-output "alb_dns_name" {
-  value       = aws_lb.example.dns_name
-  description = "The domain name of the load balancer"
+data "template_file" "user_data" {
+  template = file("user-data.sh")
+
+  vars = {
+    server_port = var.server_port
+    db_address  = data.terraform_remote_state.db.outputs.address
+    db_port     = data.terraform_remote_state.db.outputs.port
+  }
 }
